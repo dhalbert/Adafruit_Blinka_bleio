@@ -180,7 +180,7 @@ class Characteristic:
         """The value of this characteristic."""
         return adap.adapter.await_bleak(
             # pylint: disable=protected-access
-            self.service.connection._bleak_client.read_gatt_char(self.uuid._bleak_uuid)
+            self.service.connection._bleak_client.read_gatt_char(self._bleak_gatt_characteristic.handle)
         )
 
     @value.setter
@@ -190,7 +190,7 @@ class Characteristic:
             # So use a bytearray.
             # pylint: disable=protected-access
             self.service.connection._bleak_client.write_gatt_char(
-                self.uuid._bleak_uuid,
+                self._bleak_gatt_characteristic.handle,
                 bytearray(val),
                 response=self.properties | Characteristic.WRITE,
             )
@@ -219,14 +219,14 @@ class Characteristic:
         if notify:
             adap.adapter.await_bleak(
                 self._service.connection._bleak_client.start_notify(
-                    self._bleak_gatt_characteristic.uuid,
+                    self._bleak_gatt_characteristic.handle,
                     self._notify_callback,
                 )
             )
         else:
             adap.adapter.await_bleak(
                 self._service._bleak_client.stop_notify(
-                    self._bleak_gatt_characteristic.uuid
+                    self._bleak_gatt_characteristic.handle
                 )
             )
 
