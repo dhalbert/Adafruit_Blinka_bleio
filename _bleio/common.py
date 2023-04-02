@@ -228,6 +228,8 @@ class Adapter:  # pylint: disable=too-many-instance-attributes
         # In the future, we might remember these for a few minutes.
         self._clear_device_cache()
 
+        self._scanning_in_progress = True
+
         if self._use_hcitool:
             for scan_entry in self._start_scan_hcitool(
                 prefixes,
@@ -237,8 +239,6 @@ class Adapter:  # pylint: disable=too-many-instance-attributes
             ):
                 yield scan_entry
             return
-
-        self._scanning_in_progress = True
 
         start = time.time()
         while self._scanning_in_progress and (
@@ -258,6 +258,7 @@ class Adapter:  # pylint: disable=too-many-instance-attributes
                 if not scan_entry.matches(prefixes, all=False):
                     continue
                 yield scan_entry
+        self._scanning_in_progress = False
 
     @staticmethod
     def _parse_hcidump_data(buffered, prefixes, minimum_rssi, active):
@@ -310,42 +311,44 @@ class Adapter:  # pylint: disable=too-many-instance-attributes
         """hcitool scanning (only on Linux)"""
         # hcidump outputs the full advertisement data, assuming it's run privileged.
         # Since hcitool is privileged, we assume hcidump is too.
-        hcidump = subprocess.Popen(
+        with subprocess.Popen(
             ["hcidump", "--raw", "hci"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-        )
+        ) as hcidump, subprocess.Popen(
+            ["hcitool", "lescan", "--duplicates"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ) as hcitool:
+            # Throw away the first two output lines of hcidump because they are version info.
+            hcidump.stdout.readline()
+            hcidump.stdout.readline()
+            returncode = hcitool.poll()
+            start_time = time.monotonic()
+            buffered = []
+            while (
+                returncode is None
+                and self._scanning_in_progress
+                and (not timeout or time.monotonic() - start_time < timeout)
+            ):
+                line = hcidump.stdout.readline()
+                # print(line, line[0])
+                if line[0] != 32:  # 32 is ascii for space
+                    if buffered:
+                        parsed = self._parse_hcidump_data(
+                            buffered, prefixes, minimum_rssi, active
+                        )
+                        if parsed:
+                            yield parsed
+                        buffered.clear()
 
-        if not self._hcitool:
-            self._hcitool = subprocess.Popen(
-                ["hcitool", "lescan", "--duplicates"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        # Throw away the first two output lines of hcidump because they are version info.
-        hcidump.stdout.readline()
-        hcidump.stdout.readline()
-        returncode = self._hcitool.poll()
-        start_time = time.monotonic()
-        buffered = []
-        while returncode is None and (
-            not timeout or time.monotonic() - start_time < timeout
-        ):
-            line = hcidump.stdout.readline()
-            # print(line, line[0])
-            if line[0] != 32:  # 32 is ascii for space
-                if buffered:
-                    parsed = self._parse_hcidump_data(
-                        buffered, prefixes, minimum_rssi, active
-                    )
-                    if parsed:
-                        yield parsed
-                    buffered.clear()
-            buffered.append(line)
-            returncode = self._hcitool.poll()
-        self.stop_scan()
+                buffered.append(line)
+                returncode = hcitool.poll()
+            hcidump.terminate()
+            hcitool.terminate()
+            self._scanning_in_progress = False
 
     async def _scan_for_interval(self, interval: float) -> Iterable[ScanEntry]:
         """Scan advertisements for the given interval and return ScanEntry objects
@@ -361,11 +364,6 @@ class Adapter:  # pylint: disable=too-many-instance-attributes
 
     def stop_scan(self) -> None:
         """Stop scanning before timeout may have occurred."""
-        if self._use_hcitool and self._hcitool:
-            if self._hcitool.returncode is None:
-                self._hcitool.send_signal(signal.SIGINT)
-                self._hcitool.wait()
-            self._hcitool = None
         self._scanning_in_progress = False
         self._scanner = None
 
